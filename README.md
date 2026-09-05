@@ -1,405 +1,118 @@
-# Order Fulfillment Service — Temporal Workflow Orchestration
+# Order Fulfillment Service
 
-A durable order-fulfillment backend built with **Temporal, FastAPI, and Docker**, demonstrating workflow orchestration, failure recovery, compensating transactions, structured observability, automated testing, and CI.
+A reliable order-processing backend built with **Temporal, FastAPI, PostgreSQL, and Docker**.
 
-## What this demonstrates
+This project demonstrates how a multi-step workflow can recover from transient failures, distinguish business errors, compensate completed work, survive worker restarts, and remain observable throughout execution.
 
-This project focuses on backend and infrastructure engineering concepts used in reliable distributed systems:
+[![CI](https://github.com/gabbyb-cloud/order-fulfillment-temporal/actions/workflows/ci.yml/badge.svg)](https://github.com/gabbyb-cloud/order-fulfillment-temporal/actions/workflows/ci.yml)
 
-* **Durable workflow execution** — orders move through payment validation → inventory reservation → shipping → customer notification using Temporal
-* **Automatic retries** — transient downstream failures are retried by Temporal rather than immediately failing the workflow
-* **Non-retryable business failures** — invalid cards, out-of-stock inventory, and invalid shipping addresses are handled separately from infrastructure failures
-* **Saga / compensating transactions** — completed steps can be reversed through payment refunds and inventory release when later steps fail
-* **Crash recovery** — worker processes can stop and restart while Temporal preserves workflow state
-* **Authenticated API boundary** — FastAPI exposes order operations behind an `X-API-Key` requirement
-* **Structured logging** — workflow activities emit JSON-style events correlated by order and activity
-* **Containerized development stack** — PostgreSQL, Temporal, Temporal UI, FastAPI, and the Temporal worker run together with Docker Compose
-* **Automated CI** — GitHub Actions runs the test suite on a clean Ubuntu environment for pushes and pull requests to `main`
-* **Performance measurement** — a reproducible local benchmark measures authenticated order-submission latency
+## Engineering focus
+
+| Capability | Implementation |
+| --- | --- |
+| Durable execution | Temporal preserves workflow state across worker restarts |
+| Failure handling | Retryable infrastructure failures are separated from non-retryable business errors |
+| Compensation | Saga actions refund payment and release inventory after partial failure |
+| API boundary | FastAPI endpoints protected by an environment-configured API key |
+| Observability | Structured activity events correlated by order and execution context |
+| Verification | Automated workflow and API tests run through GitHub Actions |
+| Reproducibility | Five-service Docker Compose development environment |
 
 ## Architecture
 
-```text
-Client
-  │
-  │ X-API-Key
-  ▼
-FastAPI API
-  │
-  │ Temporal client
-  ▼
-Temporal Server
-  │
-  ├── PostgreSQL
-  │
-  ▼
-Temporal Worker
-  │
-  ▼
-OrderFulfillmentWorkflow
-  │
-  ├── validate_payment
-  ├── reserve_inventory
-  ├── ship_order
-  └── notify_customer
-
-Compensation path:
-  ├── refund_payment
-  └── release_inventory
+```mermaid
+flowchart LR
+    Client --> API["FastAPI API"]
+    API --> Temporal["Temporal Server"]
+    Temporal --> DB[(PostgreSQL)]
+    Temporal --> Worker["Temporal Worker"]
+    Worker --> Steps["Payment · Inventory · Shipping · Notification"]
 ```
 
-The complete local stack runs through Docker Compose:
+The API starts a workflow and returns immediately. Temporal owns the longer-running execution while the worker performs each activity.
 
-```text
-Docker Compose
-├── PostgreSQL
-├── Temporal Server
-├── Temporal Web UI
-├── FastAPI API
-└── Temporal Worker
-```
+## Reliability model
 
-## Reliability and failure handling
+The workflow coordinates:
 
-The workflow distinguishes between failures that should be retried and failures that should not.
+1. Payment validation
+2. Inventory reservation
+3. Shipping
+4. Customer notification
 
-### Retryable transient failures
+Transient failures use bounded retries with exponential backoff. Invalid cards, unavailable inventory, and invalid addresses are classified as non-retryable business failures.
 
-Activities simulate temporary downstream failures such as network interruptions or service timeouts.
+When a later step fails, completed operations are compensated in reverse order:
 
-Temporal automatically retries these activities.
+- Payment completed → refund payment
+- Inventory reserved → release inventory
+- Cancellation requested → compensate completed work at the next safe checkpoint
 
-Example structured event:
+A controlled crash-recovery demonstration verifies that execution resumes from durable history after the worker restarts.
 
-```json
-{
-  "activity": "ship_order",
-  "event": "transient_failure",
-  "order_id": "order-example",
-  "retryable": true
-}
-```
+## Verified results
 
-A verified workflow demonstrated:
+| Check | Result |
+| --- | ---: |
+| Automated tests | 8 passing |
+| Authenticated benchmark requests | 25 / 25 successful |
+| Average submission latency | 30.28 ms |
+| p95 submission latency | 49.15 ms |
 
-```text
-validate_payment
-  attempt 1 → transient failure
-  attempt 2 → success
+Benchmark results were measured locally against the Dockerized stack. They cover authentication, FastAPI request handling, Temporal workflow start, and the initial response—not complete workflow duration or production-scale load.
 
-reserve_inventory
-  attempt 1 → success
+## Technology
 
-ship_order
-  attempt 1 → transient failure
-  attempt 2 → success
+**Python 3.13 · FastAPI · Pydantic · Temporal Python SDK · PostgreSQL · Docker Compose · pytest · GitHub Actions**
 
-notify_customer
-  attempt 1 → success
+## Run locally
 
-workflow → COMPLETED
-```
+### Requirements
 
-### Non-retryable business failures
+- Python 3.13
+- Docker Desktop
+- Git
 
-Examples include:
-
-* `InvalidCardError`
-* `OutOfStockError`
-* `InvalidAddressError`
-
-These are logged with:
-
-```json
-{
-  "event": "business_failure",
-  "retryable": false
-}
-```
-
-because retrying cannot correct the underlying business condition.
-
-### Saga compensation
-
-If a later step fails after earlier work has already succeeded, compensating activities undo completed operations.
-
-Examples:
-
-```text
-Payment succeeds
-      ↓
-Inventory fails
-      ↓
-refund_payment
-      ↓
-Workflow ends safely
-```
-
-and:
-
-```text
-Inventory reserved
-      ↓
-Later step fails
-      ↓
-release_inventory
-```
-
-Compensation events are emitted with `compensation=true`.
-
-## Structured logging
-
-Activity logs include fields such as:
-
-* `event`
-* `order_id`
-* `activity`
-* `retryable`
-* `error_type`
-* `compensation`
-
-Temporal also attaches execution context including activity attempt, workflow ID, workflow run ID, task queue, and workflow type.
-
-Sensitive payment authorization values are intentionally excluded from logs.
-
-Example:
-
-```json
-{
-  "activity": "validate_payment",
-  "event": "payment_validated",
-  "order_id": "order-example"
-}
-```
-
-## Tech stack
-
-* **Python 3.13**
-* **FastAPI**
-* **Pydantic**
-* **Temporal Python SDK**
-* **PostgreSQL**
-* **Docker / Docker Compose**
-* **pytest**
-* **pytest-asyncio**
-* **httpx**
-* **python-dotenv**
-* **GitHub Actions**
-
-## Getting started
-
-### Prerequisites
-
-* Python 3.13
-* Docker Desktop
-* Git
-
-### Clone and enter the project
+### Setup
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/gabbyb-cloud/order-fulfillment-temporal.git
 cd order-fulfillment-temporal
-```
-
-### Create a virtual environment
-
-Windows PowerShell:
-
-```powershell
-python -m venv venv
-.\venv\Scripts\Activate.ps1
-```
-
-Install dependencies:
-
-```powershell
-python -m pip install -r requirements.txt
-```
-
-### Configure the API key
-
-Create a `.env` file in the project root:
-
-```text
-ORDER_API_KEY=your-local-api-key
-```
-
-The `.env` file is excluded from Docker build context and should not be committed.
-
-## Running the application
-
-Build and start the complete stack:
-
-```powershell
+cp .env.example .env
 docker compose up --build -d
 ```
 
-Verify the services:
+Services:
 
-```powershell
-docker compose ps
-```
+- API: `http://localhost:8000`
+- Temporal UI: `http://localhost:8080`
 
-You should see:
+Run the tests:
 
-```text
-api
-postgresql
-temporal
-temporal-ui
-worker
-```
-
-The API is available at:
-
-```text
-http://localhost:8000
-```
-
-Temporal Web UI is available at:
-
-```text
-http://localhost:8080
-```
-
-To stop the stack:
-
-```powershell
-docker compose down
-```
-
-## API endpoints
-
-All endpoints require an `X-API-Key` header.
-
-| Method | Path                        | Description                                              |
-| ------ | --------------------------- | -------------------------------------------------------- |
-| `POST` | `/orders`                   | Start a new order fulfillment workflow                   |
-| `GET`  | `/orders/{order_id}`        | Query the current order status                           |
-| `POST` | `/orders/{order_id}/cancel` | Request cancellation and trigger applicable compensation |
-| `GET`  | `/health`                   | Health check                                             |
-
-Example order submission:
-
-```json
-{
-  "customer_name": "Demo Customer",
-  "item": "Mechanical Keyboard",
-  "quantity": 1,
-  "amount_cents": 12999
-}
-```
-
-Example response:
-
-```json
-{
-  "order_id": "order-example",
-  "status": "PLACED"
-}
-```
-
-The workflow continues durably after the API returns.
-
-## Running the tests
-
-Start the Temporal infrastructure if it is not already running:
-
-```powershell
-docker compose up -d postgresql temporal
-```
-
-Run the test suite:
-
-```powershell
+```bash
+python -m pip install -r requirements.txt
 python -m pytest -q
 ```
 
-Current result:
+Stop the environment:
 
-```text
-8 passed
+```bash
+docker compose down
 ```
 
-The suite covers:
+## API
 
-* workflow happy path
-* inventory failure and payment compensation
-* workflow status queries
-* API authentication
-* missing API keys
-* invalid API keys
-* valid authenticated requests
-* protected endpoints
+All endpoints require an `X-API-Key` header.
 
-## Continuous integration
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `POST` | `/orders` | Start an order workflow |
+| `GET` | `/orders/{order_id}` | Query workflow status |
+| `POST` | `/orders/{order_id}/cancel` | Request cancellation |
+| `GET` | `/health` | Check API health |
 
-GitHub Actions automatically runs CI for:
+## Project boundaries
 
-* pull requests targeting `main`
-* pushes to `main`
+This is a focused engineering project rather than a production commerce system. Payment, inventory, shipping, and notification activities are intentionally simulated. Production extensions would include real integrations, idempotency guarantees, managed identity and secrets, distributed tracing, alerting, and higher-volume load testing.
 
-The workflow:
-
-1. checks out the repository
-2. creates a clean Ubuntu environment
-3. installs Python 3.13
-4. installs project dependencies
-5. starts PostgreSQL and Temporal
-6. waits until the Temporal Python client can establish a connection
-7. runs the full pytest suite
-8. prints infrastructure logs automatically if CI fails
-
-This verifies the project outside the local Windows development environment.
-
-## Performance benchmark
-
-A local benchmark of **25 authenticated `POST /orders` requests** against the Dockerized stack measured order-submission latency.
-
-The measurement includes:
-
-```text
-API authentication
-      ↓
-FastAPI request handling
-      ↓
-Temporal workflow start
-      ↓
-PLACED response
-```
-
-It does **not** measure the time required for the complete fulfillment workflow to finish.
-
-| Metric     |    Result |
-| ---------- | --------: |
-| Requests   |        25 |
-| Successful | 25 (100%) |
-| Average    |  30.28 ms |
-| p50        |  24.44 ms |
-| p95        |  49.15 ms |
-| Minimum    |  13.53 ms |
-| Maximum    | 117.66 ms |
-
-Run the benchmark locally with:
-
-```powershell
-python .\benchmarks\order_submission.py
-```
-
-These results represent a local development environment and are not intended as production-scale performance claims.
-
-## Project status
-
-Core implementation is complete:
-
-* Durable Temporal workflow ✅
-* Retry handling ✅
-* Saga compensation ✅
-* Worker crash recovery ✅
-* Authenticated FastAPI service ✅
-* Automated tests ✅
-* Dockerized API and worker ✅
-* Five-service Docker Compose stack ✅
-* Structured activity logging ✅
-* GitHub Actions CI ✅
-* Local performance benchmark ✅
+See [DESIGN.md](DESIGN.md) for the complete workflow design, retry policies, compensation rules, cancellation behavior, and engineering trade-offs.
