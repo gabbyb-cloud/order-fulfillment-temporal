@@ -408,7 +408,7 @@ Sensitive payment authorization values are intentionally excluded from logs.
 
 ## Testing Strategy
 
-The automated test suite currently contains eight passing tests.
+The automated test suite currently contains 11 passing tests.
 
 Coverage includes:
 
@@ -420,6 +420,10 @@ Coverage includes:
 - missing API keys
 - invalid API keys
 - authenticated API requests
+- shipping-failure compensation in reverse order
+- cancellation after payment refunds without reserving inventory
+- cancellation after inventory reservation releases inventory,
+  refunds payment, and prevents shipping
 
 Tests are run both locally and through GitHub Actions.
 
@@ -483,22 +487,25 @@ Temporal workflow start
 PLACED response
 ```
 
-Measured local result:
+Example local run: 25 sequential authenticated requests, executed
+inside the API container against the Docker Compose stack.
 
 | Metric | Result |
 | --- | ---: |
 | Requests | 25 |
 | Successful | 25 (100%) |
-| Average | 30.28 ms |
-| p50 | 24.44 ms |
-| p95 | 49.15 ms |
-| Minimum | 13.53 ms |
-| Maximum | 117.66 ms |
+| Average | 38.74 ms |
+| p50 | 32.93 ms |
+| p95 | 75.51 ms |
+| Minimum | 12.01 ms |
+| Maximum | 107.65 ms |
 
 These results measure local order-submission latency only.
 
 They do not represent complete workflow execution time or production-scale
 throughput.
+
+Results vary with hardware, system load, and execution environment.
 
 ---
 

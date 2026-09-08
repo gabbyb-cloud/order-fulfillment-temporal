@@ -158,3 +158,207 @@ async def test_status_query_reflects_progress():
             final_status = await handle.query(OrderFulfillmentWorkflow.get_status)
             assert final_status == "COMPLETED"
             assert "completed successfully" in result
+
+
+@pytest.mark.asyncio
+async def test_shipping_failure_compensates_in_reverse_order():
+    compensation_calls = []
+
+    @activity.defn(name="ship_order")
+    async def fail_shipping(order: OrderInput) -> str:
+        raise ApplicationError(
+            "Invalid shipping address",
+            type="InvalidAddressError",
+            non_retryable=True,
+        )
+
+    @activity.defn(name="release_inventory")
+    async def record_release(
+        order: OrderInput, reservation_id: str
+    ) -> None:
+        compensation_calls.append(
+            ("release_inventory", order.order_id, reservation_id)
+        )
+
+    @activity.defn(name="refund_payment")
+    async def record_refund(
+        order: OrderInput, payment_auth: str
+    ) -> None:
+        compensation_calls.append(
+            ("refund_payment", order.order_id, payment_auth)
+        )
+
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue=TASK_QUEUE,
+            workflows=[OrderFulfillmentWorkflow],
+            activities=[
+                mock_validate_payment_success,
+                mock_reserve_inventory_success,
+                fail_shipping,
+                mock_notify_customer,
+                record_refund,
+                record_release,
+            ],
+        ):
+            order = _sample_order()
+            handle = await env.client.start_workflow(
+                OrderFulfillmentWorkflow.run,
+                order,
+                id=order.order_id,
+                task_queue=TASK_QUEUE,
+            )
+            await handle.result()
+            status = await handle.query(
+                OrderFulfillmentWorkflow.get_status
+            )
+
+            assert status == "FAILED_SHIPPING"
+            assert compensation_calls == [
+                (
+                    "release_inventory",
+                    order.order_id,
+                    f"reservation-{order.order_id}",
+                ),
+                (
+                    "refund_payment",
+                    order.order_id,
+                    f"payment-auth-{order.order_id}",
+                ),
+            ]
+
+
+
+@pytest.mark.asyncio
+async def test_cancellation_after_payment_refunds_without_reserving():
+    activity_calls = []
+
+    @activity.defn(name="validate_payment")
+    async def record_payment(order: OrderInput) -> str:
+        activity_calls.append("validate_payment")
+        return f"payment-auth-{order.order_id}"
+
+    @activity.defn(name="reserve_inventory")
+    async def record_inventory(order: OrderInput) -> str:
+        activity_calls.append("reserve_inventory")
+        return f"reservation-{order.order_id}"
+
+    @activity.defn(name="refund_payment")
+    async def record_refund(
+        order: OrderInput, payment_auth: str
+    ) -> None:
+        activity_calls.append(
+            ("refund_payment", order.order_id, payment_auth)
+        )
+
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue=TASK_QUEUE,
+            workflows=[OrderFulfillmentWorkflow],
+            activities=[
+                record_payment,
+                record_inventory,
+                mock_ship_order_success,
+                mock_notify_customer,
+                record_refund,
+                mock_release_inventory,
+            ],
+        ):
+            order = _sample_order()
+            order.demo_delay_seconds = 3600
+
+            handle = await env.client.start_workflow(
+                OrderFulfillmentWorkflow.run,
+                order,
+                id=order.order_id,
+                task_queue=TASK_QUEUE,
+            )
+
+            await handle.signal(OrderFulfillmentWorkflow.cancel_order)
+            await handle.result()
+            status = await handle.query(
+                OrderFulfillmentWorkflow.get_status
+            )
+
+            assert status == "CANCELLED"
+            assert activity_calls == [
+                "validate_payment",
+                (
+                    "refund_payment",
+                    order.order_id,
+                    f"payment-auth-{order.order_id}",
+                ),
+            ]
+@pytest.mark.asyncio
+async def test_cancellation_after_inventory_releases_and_refunds():
+    activity_calls = []
+
+    @activity.defn(name="reserve_inventory")
+    async def reserve_then_cancel(order: OrderInput) -> str:
+        activity_calls.append("reserve_inventory")
+        handle = env.client.get_workflow_handle(order.order_id)
+        await handle.signal(OrderFulfillmentWorkflow.cancel_order)
+        return f"reservation-{order.order_id}"
+
+    @activity.defn(name="ship_order")
+    async def record_shipping(order: OrderInput) -> str:
+        activity_calls.append("ship_order")
+        return f"tracking-{order.order_id}"
+
+    @activity.defn(name="release_inventory")
+    async def record_release(
+        order: OrderInput, reservation_id: str
+    ) -> None:
+        activity_calls.append(
+            ("release_inventory", order.order_id, reservation_id)
+        )
+
+    @activity.defn(name="refund_payment")
+    async def record_refund(
+        order: OrderInput, payment_auth: str
+    ) -> None:
+        activity_calls.append(
+            ("refund_payment", order.order_id, payment_auth)
+        )
+
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue=TASK_QUEUE,
+            workflows=[OrderFulfillmentWorkflow],
+            activities=[
+                mock_validate_payment_success,
+                reserve_then_cancel,
+                record_shipping,
+                mock_notify_customer,
+                record_refund,
+                record_release,
+            ],
+        ):
+            order = _sample_order()
+            handle = await env.client.start_workflow(
+                OrderFulfillmentWorkflow.run,
+                order,
+                id=order.order_id,
+                task_queue=TASK_QUEUE,
+            )
+            await handle.result()
+            status = await handle.query(
+                OrderFulfillmentWorkflow.get_status
+            )
+
+            assert status == "CANCELLED"
+            assert activity_calls == [
+                "reserve_inventory",
+                (
+                    "release_inventory",
+                    order.order_id,
+                    f"reservation-{order.order_id}",
+                ),
+                (
+                    "refund_payment",
+                    order.order_id,
+                    f"payment-auth-{order.order_id}",
+                ), ]
