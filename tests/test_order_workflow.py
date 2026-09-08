@@ -291,3 +291,74 @@ async def test_cancellation_after_payment_refunds_without_reserving():
                     f"payment-auth-{order.order_id}",
                 ),
             ]
+@pytest.mark.asyncio
+async def test_cancellation_after_inventory_releases_and_refunds():
+    activity_calls = []
+
+    @activity.defn(name="reserve_inventory")
+    async def reserve_then_cancel(order: OrderInput) -> str:
+        activity_calls.append("reserve_inventory")
+        handle = env.client.get_workflow_handle(order.order_id)
+        await handle.signal(OrderFulfillmentWorkflow.cancel_order)
+        return f"reservation-{order.order_id}"
+
+    @activity.defn(name="ship_order")
+    async def record_shipping(order: OrderInput) -> str:
+        activity_calls.append("ship_order")
+        return f"tracking-{order.order_id}"
+
+    @activity.defn(name="release_inventory")
+    async def record_release(
+        order: OrderInput, reservation_id: str
+    ) -> None:
+        activity_calls.append(
+            ("release_inventory", order.order_id, reservation_id)
+        )
+
+    @activity.defn(name="refund_payment")
+    async def record_refund(
+        order: OrderInput, payment_auth: str
+    ) -> None:
+        activity_calls.append(
+            ("refund_payment", order.order_id, payment_auth)
+        )
+
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue=TASK_QUEUE,
+            workflows=[OrderFulfillmentWorkflow],
+            activities=[
+                mock_validate_payment_success,
+                reserve_then_cancel,
+                record_shipping,
+                mock_notify_customer,
+                record_refund,
+                record_release,
+            ],
+        ):
+            order = _sample_order()
+            handle = await env.client.start_workflow(
+                OrderFulfillmentWorkflow.run,
+                order,
+                id=order.order_id,
+                task_queue=TASK_QUEUE,
+            )
+            await handle.result()
+            status = await handle.query(
+                OrderFulfillmentWorkflow.get_status
+            )
+
+            assert status == "CANCELLED"
+            assert activity_calls == [
+                "reserve_inventory",
+                (
+                    "release_inventory",
+                    order.order_id,
+                    f"reservation-{order.order_id}",
+                ),
+                (
+                    "refund_payment",
+                    order.order_id,
+                    f"payment-auth-{order.order_id}",
+                ), ]
