@@ -54,12 +54,21 @@ A controlled crash-recovery demonstration verifies that execution resumes from d
 
 | Check | Result |
 | --- | ---: |
-| Automated tests | 8 passing |
+| Automated tests | 11 passing |
 | Authenticated benchmark requests | 25 / 25 successful |
-| Average submission latency | 30.28 ms |
-| p95 submission latency | 49.15 ms |
+| Average submission latency | 38.74 ms |
+| p95 submission latency | 75.51 ms |
 
-Benchmark results were measured locally against the Dockerized stack. They cover authentication, FastAPI request handling, Temporal workflow start, and the initial response—not complete workflow duration or production-scale load.
+The automated suite includes checks for shipping-failure compensation
+and cancellation at the checkpoints after payment and inventory
+reservation. These verify compensation order and that cancellation
+prevents subsequent inventory reservation or shipping, respectively.
+
+These benchmark numbers are an example local run, with the benchmark
+executed inside the API container against the Docker Compose stack.
+The run used 25 sequential authenticated requests and measured order
+submission—not complete workflow duration or production-scale load.
+Results vary with hardware, system load, and execution environment.
 
 ## Technology
 
