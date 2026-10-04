@@ -5,7 +5,7 @@ A Temporal-based order-fulfillment service that keeps multi-step workflows durab
 [![CI](https://github.com/gabbyb-cloud/order-fulfillment-temporal/actions/workflows/ci.yml/badge.svg)](https://github.com/gabbyb-cloud/order-fulfillment-temporal/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/Python-3.13-blue)
 
-## Why it exists
+## Overview
 
 Order processing looks simple until one step succeeds and the next one fails. I built this project to explore how a backend can keep workflow state durable, distinguish failures that should be retried from failures that should not, and recover cleanly after partial completion or a worker crash.
 
@@ -64,7 +64,7 @@ Stop everything with:
 docker compose down
 ```
 
-## Testing
+## Testing and evidence
 
 Install the Python dependencies and run the suite:
 
@@ -86,7 +86,7 @@ The tests cover:
 
 The important part is that failure paths are asserted as system behavior. For example, compensation tests verify that completed actions are reversed in the expected order, while cancellation tests verify that later work does not continue after a safe cancellation point.
 
-## Reliability and tradeoffs
+## Tradeoffs and limits
 
 **Worker failure:** workflow progress is stored by Temporal rather than only in worker memory. If the worker stops, workflow history remains durable and execution can continue after the worker returns.
 
@@ -119,7 +119,7 @@ These are measurements from a local run against the Docker Compose stack, not pr
 
 The benchmark used 25 sequential authenticated requests and measured **order submission latency only**. It does not represent complete workflow duration or production-scale throughput, and results will vary by hardware and system load.
 
-## What I'd do next
+## Next steps
 
 - Add distributed tracing and production-style metrics so a single order can be followed across API, workflow, and activity boundaries.
 - Strengthen idempotency around external side effects before replacing the simulated activities with real payment, inventory, or shipping integrations.
